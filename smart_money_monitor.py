@@ -434,13 +434,19 @@ def receipt_mentions_native_swap(chain: str, receipt: dict[str, Any], watched_wa
         native_markers.add(padded_topic_address(wrapped_native))
 
     watched_markers = {padded_topic_address(address) for address in watched_wallets}
+    saw_watched_marker = False
+    saw_native_marker = False
 
     for log in receipt.get("logs") or []:
         topics = [str(topic).lower() for topic in (log.get("topics") or [])]
         payload = "".join(topics) + str(log.get("data") or "").lower() + str(log.get("address") or "").lower()
-        if any(marker in payload for marker in watched_markers) and any(marker in payload for marker in native_markers):
+        if any(marker in payload for marker in watched_markers):
+            saw_watched_marker = True
+        if any(marker in payload for marker in native_markers):
+            saw_native_marker = True
+        if saw_watched_marker and saw_native_marker:
             return True
-    return False
+    return saw_watched_marker and saw_native_marker
 
 
 def group_evm_transfers(
