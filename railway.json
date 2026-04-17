@@ -1,0 +1,20 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "watchPatterns": [
+      "Dockerfile",
+      "README.md",
+      "requirements.txt",
+      "smart_money_monitor.py",
+      "smart_money_active.csv",
+      "start.sh",
+      ".env.example",
+      "railway.json"
+    ]
+  },
+  "deploy": {
+    "restartPolicyType": "ALWAYS",
+    "restartPolicyMaxRetries": 10
+  }
+}

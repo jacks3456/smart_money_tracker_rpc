@@ -157,6 +157,48 @@ TELEGRAM_CHAT_ID=...
 
 按 Railway 官方文档，Volume 会在你指定的 mount path 以目录形式提供给服务，并且运行时会自动注入 `RAILWAY_VOLUME_MOUNT_PATH` 变量；Variables 也会在构建和运行时提供给服务。
 
+这个仓库现在还带了 [railway.json](/Users/wj/Documents/smart_money_tracker_rpc/railway.json:1)，会告诉 Railway：
+
+- 用 `Dockerfile` 构建
+- 只在关键文件变化时触发重新部署
+- 服务异常退出时按 `ALWAYS` 重启策略拉起
+
+按 Railway 官方文档，`Dockerfile` 存在时会优先按 Dockerfile 构建；Volume 挂载后，运行时还会自动提供 `RAILWAY_VOLUME_MOUNT_PATH`。
+
+### Railway 上线清单
+
+1. 打开 Railway，新建 Project
+2. 选择 `Deploy from GitHub repo`
+3. 选中仓库 `jacks3456/smart_money_tracker_rpc`
+4. 进入这个 service，确认它识别到仓库里的 `Dockerfile`
+5. 给 service 添加一个 Volume，mount path 设为 `/data`
+6. 在 Variables 里填入下面这些值
+
+```env
+ETHEREUM_RPC_URL=...
+BASE_RPC_URL=...
+BNB_RPC_URL=...
+SOLANA_RPC_URL=...
+SMART_MONEY_CSV=/app/smart_money_active.csv
+POLL_INTERVAL_SECONDS=3600
+BOOTSTRAP_LOOKBACK_MINUTES=60
+```
+
+如果要 Telegram 告警，再加：
+
+```env
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
+
+部署成功后，日志里你应该先看到类似下面这一行：
+
+```text
+watching /app/smart_money_active.csv; evm_chains=['base', 'bnb', 'ethereum']; solana=enabled; polling every 3600s
+```
+
+如果没有挂 Volume，服务虽然也能跑，但重启后会丢掉 `monitor_state.json`，从而增加重复告警风险。
+
 ### Docker 本地构建命令
 
 如果你只是想验证镜像能启动，可以用：
