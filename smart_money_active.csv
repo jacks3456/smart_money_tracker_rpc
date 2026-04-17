@@ -1,0 +1,3 @@
+address_type,address,label,enabled
+evm,0xac249d4fad1198eb9b124d4aebaee40f7a003bf1,example-evm,true
+sol,93NyvGRa4SG5p6XDWTpx9JHGU7j8ubw9QUzYLojhv7tJ,example-sol,true
