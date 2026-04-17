@@ -26,9 +26,20 @@ USER_AGENT = "smart-money-tracker-rpc/1.0"
 ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 ERC20_SYMBOL_SELECTOR = "0x95d89b41"
 ERC20_DECIMALS_SELECTOR = "0x313ce567"
+NATIVE_TOKEN_PLACEHOLDER = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 EVM_MONITOR_CHAINS = ("ethereum", "base", "bnb")
 SOL_MONITOR_CHAIN = "solana"
 SOL_SWAP_KEYWORDS = ("swap", "route", "raydium", "jupiter", "orca", "meteora", "pump")
+CHAIN_NATIVE_SYMBOL = {
+    "ethereum": "ETH",
+    "base": "ETH",
+    "bnb": "BNB",
+}
+CHAIN_WRAPPED_NATIVE_TOKEN = {
+    "ethereum": "0xc02aa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    "base": "0x4200000000000000000000000000000000000006",
+    "bnb": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+}
 
 
 @dataclass(slots=True)
@@ -319,6 +330,10 @@ def evm_eth_call(client: JsonRpcClient, to: str, data: str) -> str:
     return result or "0x"
 
 
+def evm_get_transaction_receipt(client: JsonRpcClient, tx_hash: str) -> dict[str, Any]:
+    return client.call("eth_getTransactionReceipt", [tx_hash]) or {}
+
+
 def decode_erc20_symbol(raw: str) -> str | None:
     if not raw or raw == "0x":
         return None
@@ -361,6 +376,36 @@ def evm_token_metadata(client: JsonRpcClient, token_address: str, cache: dict[st
 def format_token_amount(raw_value: int, decimals: int) -> str:
     scale = Decimal(10) ** decimals
     return format_decimal(Decimal(raw_value) / scale)
+
+
+def native_token_metadata(chain: str) -> dict[str, Any]:
+    return {
+        "symbol": CHAIN_NATIVE_SYMBOL.get(chain, "NATIVE"),
+        "address": NATIVE_TOKEN_PLACEHOLDER,
+        "decimals": 18,
+    }
+
+
+def receipt_mentions_native_swap(chain: str, receipt: dict[str, Any], watched_wallets: set[str]) -> bool:
+    if not watched_wallets:
+        return False
+
+    wrapped_native = CHAIN_WRAPPED_NATIVE_TOKEN.get(chain, "")
+    native_markers = {
+        padded_topic_address(NATIVE_TOKEN_PLACEHOLDER),
+        padded_topic_address("0x0000000000000000000000000000000000000000"),
+    }
+    if wrapped_native:
+        native_markers.add(padded_topic_address(wrapped_native))
+
+    watched_markers = {padded_topic_address(address) for address in watched_wallets}
+
+    for log in receipt.get("logs") or []:
+        topics = [str(topic).lower() for topic in (log.get("topics") or [])]
+        payload = "".join(topics) + str(log.get("data") or "").lower() + str(log.get("address") or "").lower()
+        if any(marker in payload for marker in watched_markers) and any(marker in payload for marker in native_markers):
+            return True
+    return False
 
 
 def group_evm_transfers(
@@ -447,13 +492,11 @@ def fetch_evm_swap_candidates(
 
     block_cache: dict[int, dict[str, Any]] = {}
     tx_cache: dict[str, dict[str, Any]] = {}
+    receipt_cache: dict[str, dict[str, Any]] = {}
     token_cache: dict[str, dict[str, Any]] = {}
     rows: list[dict[str, Any]] = []
 
     for tx_hash, grouped in group_evm_transfers(transfers).items():
-        if not grouped["incoming"] or not grouped["outgoing"]:
-            continue
-
         tx_data = tx_cache.get(tx_hash)
         if tx_data is None:
             tx_data = client.call("eth_getTransactionByHash", [tx_hash]) or {}
@@ -466,31 +509,94 @@ def fetch_evm_swap_candidates(
             block_cache[block_number] = block
 
         block_time = datetime.fromtimestamp(hex_to_int(block.get("timestamp")), tz=timezone.utc)
-        outgoing = grouped["outgoing"][0]
-        incoming = grouped["incoming"][0]
-        outgoing_meta = evm_token_metadata(client, outgoing.token_address, token_cache)
-        incoming_meta = evm_token_metadata(client, incoming.token_address, token_cache)
+        tx_from = normalize_hex_address(tx_data.get("from"))
+        tx_to = normalize_hex_address(tx_data.get("to"))
+        tx_value = hex_to_int(tx_data.get("value"))
 
-        rows.append(
-            {
-                "kind": "evm",
-                "blockchain": chain,
-                "block_time": isoformat_z(block_time),
-                "tx_hash": tx_hash,
-                "tx_from": normalize_hex_address(tx_data.get("from")),
-                "tx_to": normalize_hex_address(tx_data.get("to")),
-                "project": normalize_hex_address(tx_data.get("to")) or "unknown-router",
-                "trade_source": "erc20-transfer-heuristic",
-                "watched_wallets": sorted(grouped["wallets"]),
-                "token_sold_symbol": outgoing_meta["symbol"],
-                "token_sold_address": outgoing.token_address,
-                "token_sold_amount": format_token_amount(outgoing.value, outgoing_meta["decimals"]),
-                "token_bought_symbol": incoming_meta["symbol"],
-                "token_bought_address": incoming.token_address,
-                "token_bought_amount": format_token_amount(incoming.value, incoming_meta["decimals"]),
-                "token_pair": f"{outgoing_meta['symbol']}/{incoming_meta['symbol']}",
-            }
-        )
+        if grouped["incoming"] and grouped["outgoing"]:
+            outgoing = grouped["outgoing"][0]
+            incoming = grouped["incoming"][0]
+            outgoing_meta = evm_token_metadata(client, outgoing.token_address, token_cache)
+            incoming_meta = evm_token_metadata(client, incoming.token_address, token_cache)
+
+            rows.append(
+                {
+                    "kind": "evm",
+                    "blockchain": chain,
+                    "block_time": isoformat_z(block_time),
+                    "tx_hash": tx_hash,
+                    "tx_from": tx_from,
+                    "tx_to": tx_to,
+                    "project": tx_to or "unknown-router",
+                    "trade_source": "erc20-transfer-heuristic",
+                    "watched_wallets": sorted(grouped["wallets"]),
+                    "token_sold_symbol": outgoing_meta["symbol"],
+                    "token_sold_address": outgoing.token_address,
+                    "token_sold_amount": format_token_amount(outgoing.value, outgoing_meta["decimals"]),
+                    "token_bought_symbol": incoming_meta["symbol"],
+                    "token_bought_address": incoming.token_address,
+                    "token_bought_amount": format_token_amount(incoming.value, incoming_meta["decimals"]),
+                    "token_pair": f"{outgoing_meta['symbol']}/{incoming_meta['symbol']}",
+                }
+            )
+            continue
+
+        if grouped["incoming"] and tx_value > 0 and tx_from in grouped["wallets"]:
+            incoming = grouped["incoming"][0]
+            incoming_meta = evm_token_metadata(client, incoming.token_address, token_cache)
+            sold_meta = native_token_metadata(chain)
+            rows.append(
+                {
+                    "kind": "evm",
+                    "blockchain": chain,
+                    "block_time": isoformat_z(block_time),
+                    "tx_hash": tx_hash,
+                    "tx_from": tx_from,
+                    "tx_to": tx_to,
+                    "project": tx_to or "unknown-router",
+                    "trade_source": "native-value+erc20-in-heuristic",
+                    "watched_wallets": sorted(grouped["wallets"]),
+                    "token_sold_symbol": sold_meta["symbol"],
+                    "token_sold_address": sold_meta["address"],
+                    "token_sold_amount": format_token_amount(tx_value, sold_meta["decimals"]),
+                    "token_bought_symbol": incoming_meta["symbol"],
+                    "token_bought_address": incoming.token_address,
+                    "token_bought_amount": format_token_amount(incoming.value, incoming_meta["decimals"]),
+                    "token_pair": f"{sold_meta['symbol']}/{incoming_meta['symbol']}",
+                }
+            )
+            continue
+
+        if grouped["outgoing"]:
+            receipt = receipt_cache.get(tx_hash)
+            if receipt is None:
+                receipt = evm_get_transaction_receipt(client, tx_hash)
+                receipt_cache[tx_hash] = receipt
+
+            if receipt_mentions_native_swap(chain, receipt, grouped["wallets"]):
+                outgoing = grouped["outgoing"][0]
+                outgoing_meta = evm_token_metadata(client, outgoing.token_address, token_cache)
+                bought_meta = native_token_metadata(chain)
+                rows.append(
+                    {
+                        "kind": "evm",
+                        "blockchain": chain,
+                        "block_time": isoformat_z(block_time),
+                        "tx_hash": tx_hash,
+                        "tx_from": tx_from,
+                        "tx_to": tx_to,
+                        "project": tx_to or "unknown-router",
+                        "trade_source": "erc20-out+native-receipt-heuristic",
+                        "watched_wallets": sorted(grouped["wallets"]),
+                        "token_sold_symbol": outgoing_meta["symbol"],
+                        "token_sold_address": outgoing.token_address,
+                        "token_sold_amount": format_token_amount(outgoing.value, outgoing_meta["decimals"]),
+                        "token_bought_symbol": bought_meta["symbol"],
+                        "token_bought_address": bought_meta["address"],
+                        "token_bought_amount": "native-amount-unavailable",
+                        "token_pair": f"{outgoing_meta['symbol']}/{bought_meta['symbol']}",
+                    }
+                )
 
     return rows, end_block
 
