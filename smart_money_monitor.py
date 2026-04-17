@@ -212,6 +212,15 @@ def send_webhook(url: str, message: str) -> None:
     response.raise_for_status()
 
 
+def send_wecom_webhook(url: str, message: str) -> None:
+    response = requests.post(
+        url,
+        json={"msgtype": "markdown", "markdown": {"content": message.replace("\n", "\n> ")}},
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+
+
 def dispatch_alerts(message: str, log_file: Path) -> None:
     print(message, flush=True)
     append_alert_log(log_file, message)
@@ -220,6 +229,10 @@ def dispatch_alerts(message: str, log_file: Path) -> None:
     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     if telegram_bot_token and telegram_chat_id:
         send_telegram_alert(telegram_bot_token, telegram_chat_id, message)
+
+    wecom_webhook_url = os.getenv("WECOM_WEBHOOK_URL", "").strip()
+    if wecom_webhook_url:
+        send_wecom_webhook(wecom_webhook_url, message)
 
     for env_name in ("SLACK_WEBHOOK_URL", "DISCORD_WEBHOOK_URL", "GENERIC_WEBHOOK_URL"):
         webhook_url = os.getenv(env_name, "").strip()
