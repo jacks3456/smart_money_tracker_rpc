@@ -221,6 +221,23 @@ def send_wecom_webhook(url: str, message: str) -> None:
     response.raise_for_status()
 
 
+def send_wxpusher_alert(app_token: str, uid: str, message: str) -> None:
+    response = requests.post(
+        "https://wxpusher.zjiecode.com/api/send/message",
+        json={
+            "appToken": app_token,
+            "content": message,
+            "contentType": 2,
+            "uids": [uid],
+        },
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("code") != 1000:
+        raise RuntimeError(f"WxPusher send failed: {payload}")
+
+
 def dispatch_alerts(message: str, log_file: Path) -> None:
     print(message, flush=True)
     append_alert_log(log_file, message)
@@ -233,6 +250,11 @@ def dispatch_alerts(message: str, log_file: Path) -> None:
     wecom_webhook_url = os.getenv("WECOM_WEBHOOK_URL", "").strip()
     if wecom_webhook_url:
         send_wecom_webhook(wecom_webhook_url, message)
+
+    wxpusher_app_token = os.getenv("WXPUSHER_APP_TOKEN", "").strip()
+    wxpusher_uid = os.getenv("WXPUSHER_UID", "").strip()
+    if wxpusher_app_token and wxpusher_uid:
+        send_wxpusher_alert(wxpusher_app_token, wxpusher_uid, message)
 
     for env_name in ("SLACK_WEBHOOK_URL", "DISCORD_WEBHOOK_URL", "GENERIC_WEBHOOK_URL"):
         webhook_url = os.getenv(env_name, "").strip()
