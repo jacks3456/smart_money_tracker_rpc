@@ -726,21 +726,18 @@ def format_alert(row: dict[str, Any], watch_map: dict[str, WatchAddress]) -> str
         watch_map.get(address, WatchAddress("", address, address, tuple())).label
         for address in row.get("watched_wallets", [])
     )
+    tx_id = row.get("tx_hash") or row.get("tx_id") or "unknown"
     return (
-        f"swap-like activity detected\n"
         f"time: {row.get('block_time', 'unknown')}\n"
         f"chain: {row.get('blockchain', 'unknown')}\n"
-        f"source: {row.get('trade_source', 'unknown')}\n"
-        f"router/program: {row.get('project', 'unknown')}\n"
         f"watched wallet: {watched_wallets or 'unknown'}\n"
         f"initiator: {row.get('tx_from', 'unknown')}\n"
-        f"counterparty: {row.get('tx_to', 'n/a') or 'n/a'}\n"
         f"pair: {row.get('token_pair', 'unknown')}\n"
         f"sell: {row.get('token_sold_amount', 'n/a')} {row.get('token_sold_symbol', 'unknown')}\n"
         f"sell token: {row.get('token_sold_address', 'n/a')}\n"
         f"buy: {row.get('token_bought_amount', 'n/a')} {row.get('token_bought_symbol', 'unknown')}\n"
         f"buy token: {row.get('token_bought_address', 'n/a')}\n"
-        f"tx: {row.get('tx_hash') or row.get('tx_id') or 'unknown'}"
+        f"tx: {tx_id}"
     )
 
 
