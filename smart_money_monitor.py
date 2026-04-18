@@ -807,7 +807,7 @@ def run_once(
     bootstrap_lookback_minutes: int,
     evm_log_block_chunk: int,
     solana_signature_limit: int,
-) -> None:
+) -> dict[str, Any]:
     state = load_state(state_file, bootstrap_lookback_minutes)
     start_time = parse_iso_datetime(state["last_checked_at"])
     end_time = utc_now()
@@ -815,6 +815,15 @@ def run_once(
     evm_watches, sol_watches = load_watchlist(csv_path)
     watch_map = {watch.address: watch for watch in evm_watches + sol_watches}
     rows: list[dict[str, Any]] = []
+    stats: dict[str, Any] = {
+        "window_start": isoformat_z(start_time),
+        "window_end": isoformat_z(end_time),
+        "evm_watch_count": len(evm_watches),
+        "sol_watch_count": len(sol_watches),
+        "rows_seen": 0,
+        "fresh_alerts": 0,
+        "evm_scan_ranges": {},
+    }
 
     if evm_watches:
         evm_last_scanned = state.get("evm_last_scanned_blocks", {})
@@ -837,6 +846,11 @@ def run_once(
                 )
                 rows.extend(chain_rows)
                 evm_last_scanned[chain] = last_scanned_block
+                stats["evm_scan_ranges"][chain] = {
+                    "from_block": start_block,
+                    "to_block": latest_block,
+                    "candidates": len(chain_rows),
+                }
             except Exception as exc:
                 append_alert_log(
                     alert_log_file,
@@ -853,6 +867,7 @@ def run_once(
                 f"[{isoformat_z(utc_now())}] solana scan failed: {exc}",
             )
 
+    stats["rows_seen"] = len(rows)
     seen_transactions = state.get("seen_transactions", {})
     fresh_rows: list[dict[str, Any]] = []
     for row in sorted(rows, key=lambda item: item.get("block_time", "")):
@@ -862,12 +877,14 @@ def run_once(
         fresh_rows.append(row)
         seen_transactions[identifier] = isoformat_z(end_time)
 
+    stats["fresh_alerts"] = len(fresh_rows)
     for row in fresh_rows:
         dispatch_alerts(format_alert(row, watch_map), alert_log_file)
 
     state["last_checked_at"] = isoformat_z(end_time)
     state["seen_transactions"] = prune_seen_transactions(seen_transactions)
     save_state(state_file, state)
+    return stats
 
 
 def parse_args() -> argparse.Namespace:
@@ -901,9 +918,16 @@ def main() -> int:
         flush=True,
     )
 
+    cycle = 0
     while True:
         try:
-            run_once(
+            cycle += 1
+            cycle_started_at = utc_now()
+            print(
+                f"[cycle {cycle}] start; at={isoformat_z(cycle_started_at)}; poll_interval={poll_interval}s",
+                flush=True,
+            )
+            stats = run_once(
                 evm_clients=evm_clients,
                 solana_client=solana_client,
                 csv_path=csv_path,
@@ -912,6 +936,12 @@ def main() -> int:
                 bootstrap_lookback_minutes=bootstrap_lookback_minutes,
                 evm_log_block_chunk=evm_log_block_chunk,
                 solana_signature_limit=solana_signature_limit,
+            )
+            print(
+                f"[cycle {cycle}] done; window={stats['window_start']} -> {stats['window_end']}; "
+                f"evm_watches={stats['evm_watch_count']}; sol_watches={stats['sol_watch_count']}; "
+                f"candidates={stats['rows_seen']}; fresh_alerts={stats['fresh_alerts']}",
+                flush=True,
             )
             if args.once:
                 return 0
