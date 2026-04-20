@@ -21,6 +21,8 @@ DEFAULT_BOOTSTRAP_LOOKBACK_MINUTES = 60
 DEFAULT_TIMEOUT_SECONDS = 45
 DEFAULT_EVM_LOG_BLOCK_CHUNK = 1500
 DEFAULT_SOLANA_SIGNATURE_LIMIT = 100
+DEFAULT_RPC_MAX_RETRIES = 6
+DEFAULT_RPC_BACKOFF_BASE_SECONDS = 1.5
 MAX_SEEN_TRANSACTIONS = 5000
 USER_AGENT = "smart-money-tracker-rpc/1.0"
 ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -39,6 +41,22 @@ CHAIN_WRAPPED_NATIVE_TOKEN = {
     "ethereum": "0xc02aa39b223fe8d0a0e5c4f27ead9083c756cc2",
     "base": "0x4200000000000000000000000000000000000006",
     "bnb": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+}
+CHAIN_MIN_REQUEST_INTERVAL_SECONDS = {
+    "ethereum": 0.35,
+    "base": 0.1,
+    "bnb": 0.1,
+    "solana": 0.0,
+}
+CHAIN_METHOD_MIN_REQUEST_INTERVAL_SECONDS = {
+    "ethereum": {
+        "eth_getLogs": 0.85,
+        "eth_getBlockByNumber": 0.35,
+        "eth_getTransactionByHash": 0.25,
+        "eth_getTransactionReceipt": 0.25,
+        "eth_getTransactionCount": 0.25,
+        "eth_call": 0.2,
+    }
 }
 
 
@@ -287,16 +305,64 @@ class JsonRpcClient:
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json", "User-Agent": USER_AGENT})
         self._request_id = 0
+        self._last_request_at = 0.0
+        self._min_request_interval = CHAIN_MIN_REQUEST_INTERVAL_SECONDS.get(name, 0.0)
+        self._method_min_request_interval = CHAIN_METHOD_MIN_REQUEST_INTERVAL_SECONDS.get(name, {})
+
+    def _wait_for_slot(self, method: str) -> None:
+        min_interval = max(self._min_request_interval, self._method_min_request_interval.get(method, 0.0))
+        if min_interval <= 0:
+            return
+
+        elapsed = time.monotonic() - self._last_request_at
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+
+    def _record_request(self) -> None:
+        self._last_request_at = time.monotonic()
 
     def call(self, method: str, params: list[Any]) -> Any:
-        self._request_id += 1
-        payload = {"jsonrpc": "2.0", "id": self._request_id, "method": method, "params": params}
-        response = self.session.post(self.url, json=payload, timeout=self.timeout)
-        response.raise_for_status()
-        data = response.json()
-        if data.get("error"):
-            raise RuntimeError(f"{self.name} RPC {method} failed: {data['error']}")
-        return data.get("result")
+        last_error: Exception | None = None
+        for attempt in range(DEFAULT_RPC_MAX_RETRIES):
+            self._request_id += 1
+            payload = {"jsonrpc": "2.0", "id": self._request_id, "method": method, "params": params}
+            self._wait_for_slot(method)
+            try:
+                response = self.session.post(self.url, json=payload, timeout=self.timeout)
+                self._record_request()
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after:
+                        backoff_seconds = float(retry_after)
+                    else:
+                        backoff_seconds = DEFAULT_RPC_BACKOFF_BASE_SECONDS * (2 ** attempt)
+                    time.sleep(min(backoff_seconds, 30.0))
+                    continue
+
+                response.raise_for_status()
+                data = response.json()
+                if data.get("error"):
+                    raise RuntimeError(f"{self.name} RPC {method} failed: {data['error']}")
+                return data.get("result")
+            except requests.HTTPError as exc:
+                self._record_request()
+                last_error = exc
+                response = exc.response
+                status_code = response.status_code if response is not None else None
+                if attempt < DEFAULT_RPC_MAX_RETRIES - 1 and status_code in {408, 425, 429, 500, 502, 503, 504}:
+                    time.sleep(min(DEFAULT_RPC_BACKOFF_BASE_SECONDS * (2 ** attempt), 30.0))
+                    continue
+                raise
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt < DEFAULT_RPC_MAX_RETRIES - 1:
+                    time.sleep(min(DEFAULT_RPC_BACKOFF_BASE_SECONDS * (2 ** attempt), 30.0))
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(f"{self.name} RPC {method} failed after retries")
 
 
 def padded_topic_address(address: str) -> str:
@@ -533,6 +599,7 @@ def fetch_evm_swap_candidates(
 
     transfers: list[EvmTransfer] = []
     padded_addresses = {watch.address: padded_topic_address(watch.address) for watch in watches}
+    effective_block_chunk_size = min(block_chunk_size, 40) if chain == "ethereum" else block_chunk_size
 
     for watch in watches:
         topic_address = padded_addresses[watch.address]
@@ -541,14 +608,14 @@ def fetch_evm_swap_candidates(
             start_block,
             end_block,
             [ERC20_TRANSFER_TOPIC, topic_address],
-            block_chunk_size,
+            effective_block_chunk_size,
         )
         incoming_logs = evm_collect_logs_adaptive(
             client,
             start_block,
             end_block,
             [ERC20_TRANSFER_TOPIC, None, topic_address],
-            block_chunk_size,
+            effective_block_chunk_size,
         )
 
         for log in outgoing_logs:
