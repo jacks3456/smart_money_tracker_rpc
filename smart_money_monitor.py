@@ -377,6 +377,38 @@ def evm_get_logs(
     return client.call("eth_getLogs", params) or []
 
 
+def is_http_status_error(exc: Exception, status_code: int) -> bool:
+    if not isinstance(exc, requests.HTTPError):
+        return False
+    response = exc.response
+    return response is not None and response.status_code == status_code
+
+
+def evm_collect_logs_adaptive(
+    client: JsonRpcClient,
+    start_block: int,
+    end_block: int,
+    topics: list[Any],
+    block_chunk_size: int,
+) -> list[dict[str, Any]]:
+    logs: list[dict[str, Any]] = []
+    cursor = start_block
+    current_chunk_size = max(1, block_chunk_size)
+
+    while cursor <= end_block:
+        chunk_end = min(cursor + current_chunk_size - 1, end_block)
+        try:
+            logs.extend(evm_get_logs(client, cursor, chunk_end, topics))
+            cursor = chunk_end + 1
+        except Exception as exc:
+            if current_chunk_size == 1 or not is_http_status_error(exc, 413):
+                raise
+            current_chunk_size = max(1, current_chunk_size // 2)
+            continue
+
+    return logs
+
+
 def evm_eth_call(client: JsonRpcClient, to: str, data: str) -> str:
     result = client.call("eth_call", [{"to": to, "data": data}, "latest"])
     return result or "0x"
@@ -504,49 +536,56 @@ def fetch_evm_swap_candidates(
 
     for watch in watches:
         topic_address = padded_addresses[watch.address]
-        cursor = start_block
-        while cursor <= end_block:
-            chunk_end = min(cursor + block_chunk_size - 1, end_block)
-            outgoing_logs = evm_get_logs(client, cursor, chunk_end, [ERC20_TRANSFER_TOPIC, topic_address])
-            incoming_logs = evm_get_logs(client, cursor, chunk_end, [ERC20_TRANSFER_TOPIC, None, topic_address])
+        outgoing_logs = evm_collect_logs_adaptive(
+            client,
+            start_block,
+            end_block,
+            [ERC20_TRANSFER_TOPIC, topic_address],
+            block_chunk_size,
+        )
+        incoming_logs = evm_collect_logs_adaptive(
+            client,
+            start_block,
+            end_block,
+            [ERC20_TRANSFER_TOPIC, None, topic_address],
+            block_chunk_size,
+        )
 
-            for log in outgoing_logs:
-                topics = log.get("topics") or []
-                if len(topics) < 3:
-                    continue
-                transfers.append(
-                    EvmTransfer(
-                        token_address=normalize_hex_address(log.get("address")),
-                        from_address=normalize_hex_address(topics[1]),
-                        to_address=normalize_hex_address(topics[2]),
-                        value=hex_to_int(log.get("data")),
-                        log_index=hex_to_int(log.get("logIndex")),
-                        tx_hash=str(log.get("transactionHash", "")).lower(),
-                        block_number=hex_to_int(log.get("blockNumber")),
-                        watched_address=watch.address,
-                        direction="outgoing",
-                    )
+        for log in outgoing_logs:
+            topics = log.get("topics") or []
+            if len(topics) < 3:
+                continue
+            transfers.append(
+                EvmTransfer(
+                    token_address=normalize_hex_address(log.get("address")),
+                    from_address=normalize_hex_address(topics[1]),
+                    to_address=normalize_hex_address(topics[2]),
+                    value=hex_to_int(log.get("data")),
+                    log_index=hex_to_int(log.get("logIndex")),
+                    tx_hash=str(log.get("transactionHash", "")).lower(),
+                    block_number=hex_to_int(log.get("blockNumber")),
+                    watched_address=watch.address,
+                    direction="outgoing",
                 )
+            )
 
-            for log in incoming_logs:
-                topics = log.get("topics") or []
-                if len(topics) < 3:
-                    continue
-                transfers.append(
-                    EvmTransfer(
-                        token_address=normalize_hex_address(log.get("address")),
-                        from_address=normalize_hex_address(topics[1]),
-                        to_address=normalize_hex_address(topics[2]),
-                        value=hex_to_int(log.get("data")),
-                        log_index=hex_to_int(log.get("logIndex")),
-                        tx_hash=str(log.get("transactionHash", "")).lower(),
-                        block_number=hex_to_int(log.get("blockNumber")),
-                        watched_address=watch.address,
-                        direction="incoming",
-                    )
+        for log in incoming_logs:
+            topics = log.get("topics") or []
+            if len(topics) < 3:
+                continue
+            transfers.append(
+                EvmTransfer(
+                    token_address=normalize_hex_address(log.get("address")),
+                    from_address=normalize_hex_address(topics[1]),
+                    to_address=normalize_hex_address(topics[2]),
+                    value=hex_to_int(log.get("data")),
+                    log_index=hex_to_int(log.get("logIndex")),
+                    tx_hash=str(log.get("transactionHash", "")).lower(),
+                    block_number=hex_to_int(log.get("blockNumber")),
+                    watched_address=watch.address,
+                    direction="incoming",
                 )
-
-            cursor = chunk_end + 1
+            )
 
     block_cache: dict[int, dict[str, Any]] = {}
     tx_cache: dict[str, dict[str, Any]] = {}
