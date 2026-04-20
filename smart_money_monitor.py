@@ -198,6 +198,11 @@ def append_alert_log(log_file: Path, message: str) -> None:
         handle.write("\n\n")
 
 
+def log_runtime_issue(log_file: Path, message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+    append_alert_log(log_file, message)
+
+
 def send_telegram_alert(bot_token: str, chat_id: str, message: str) -> None:
     response = requests.post(
         f"https://api.telegram.org/bot{bot_token}/sendMessage",
@@ -245,21 +250,33 @@ def dispatch_alerts(message: str, log_file: Path) -> None:
     telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     if telegram_bot_token and telegram_chat_id:
-        send_telegram_alert(telegram_bot_token, telegram_chat_id, message)
+        try:
+            send_telegram_alert(telegram_bot_token, telegram_chat_id, message)
+        except Exception as exc:
+            log_runtime_issue(log_file, f"[{isoformat_z(utc_now())}] telegram alert failed: {exc}")
 
     wecom_webhook_url = os.getenv("WECOM_WEBHOOK_URL", "").strip()
     if wecom_webhook_url:
-        send_wecom_webhook(wecom_webhook_url, message)
+        try:
+            send_wecom_webhook(wecom_webhook_url, message)
+        except Exception as exc:
+            log_runtime_issue(log_file, f"[{isoformat_z(utc_now())}] wecom alert failed: {exc}")
 
     wxpusher_app_token = os.getenv("WXPUSHER_APP_TOKEN", "").strip()
     wxpusher_uid = os.getenv("WXPUSHER_UID", "").strip()
     if wxpusher_app_token and wxpusher_uid:
-        send_wxpusher_alert(wxpusher_app_token, wxpusher_uid, message)
+        try:
+            send_wxpusher_alert(wxpusher_app_token, wxpusher_uid, message)
+        except Exception as exc:
+            log_runtime_issue(log_file, f"[{isoformat_z(utc_now())}] wxpusher alert failed: {exc}")
 
     for env_name in ("SLACK_WEBHOOK_URL", "DISCORD_WEBHOOK_URL", "GENERIC_WEBHOOK_URL"):
         webhook_url = os.getenv(env_name, "").strip()
         if webhook_url:
-            send_webhook(webhook_url, message)
+            try:
+                send_webhook(webhook_url, message)
+            except Exception as exc:
+                log_runtime_issue(log_file, f"[{isoformat_z(utc_now())}] {env_name.lower()} alert failed: {exc}")
 
 
 class JsonRpcClient:
@@ -852,7 +869,7 @@ def run_once(
                     "candidates": len(chain_rows),
                 }
             except Exception as exc:
-                append_alert_log(
+                log_runtime_issue(
                     alert_log_file,
                     f"[{isoformat_z(utc_now())}] evm chain scan failed for {chain}: {exc}",
                 )
@@ -862,7 +879,7 @@ def run_once(
         try:
             rows.extend(fetch_solana_swap_candidates(solana_client, sol_watches, start_time, solana_signature_limit))
         except Exception as exc:
-            append_alert_log(
+            log_runtime_issue(
                 alert_log_file,
                 f"[{isoformat_z(utc_now())}] solana scan failed: {exc}",
             )
